@@ -32,19 +32,20 @@ hostname = "192.168.0.99"   # address of MQTT server
 class Measurement:
     temperature: float
     humidity: int
+    voltage: float
     calibratedHumidity: int = 0
     battery: int = 0
     timestamp: int = 0
 
     def __eq__(self, other):
-        if self.temperature == other.temperature and self.humidity == other.humidity and self.calibratedHumidity == other.calibratedHumidity and self.battery == other.battery:
+        if self.temperature == other.temperature and self.humidity == other.humidity and self.calibratedHumidity == other.calibratedHumidity and self.battery == other.battery and self.voltage == other.voltage:
             return  True
         else:
             return False
 
 measurements=deque()
-globalBatteryLevel=0
-previousMeasurement=Measurement(0,0,0,0)
+#globalBatteryLevel=0
+previousMeasurement=Measurement(0,0,0,0,0,0)
 identicalCounter=0
 
 def signal_handler(sig, frame):
@@ -85,8 +86,8 @@ def thread_SendingData():
                 identicalCounter+=1
                 continue
             identicalCounter=0
-            fmt = "sensorname,temperature,humidity" #don't try to seperate by semicolon ';' os.system will use that as command seperator
-            params = args.name + " " + str(mea.temperature) + " " + str(mea.humidity)
+            fmt = "sensorname,temperature,humidity,voltage" #don't try to seperate by semicolon ';' os.system will use that as command seperator
+            params = args.name + " " + str(mea.temperature) + " " + str(mea.humidity) + " " + str(mea.voltage)
             if (args.TwoPointCalibration or args.offset): #would be more efficient to generate fmt only once
                 fmt +=",humidityCalibrated"
                 params += " " + str(mea.calibratedHumidity)
@@ -103,7 +104,7 @@ def thread_SendingData():
                     print ("Data couln't be send to Callback, retrying...")
                     time.sleep(5) #wait before trying again
             else: #data was sent
-                previousMeasurement=Measurement(mea.temperature,mea.humidity,mea.calibratedHumidity,mea.battery,0) #using copy or deepcopy requires implementation in the class definition
+                    previousMeasurement=Measurement(mea.temperature,mea.humidity,mea.voltage,mea.calibratedHumidity,mea.battery,0) #using copy or deepcopy requires implementation in the class definition
 
         except IndexError:
             #print("Keine Daten")
@@ -121,7 +122,7 @@ class MyDelegate(btle.DefaultDelegate):
     def handleNotification(self, cHandle, data):
         global measurements, topic, hostname
         try:
-            measurement = Measurement(0,0,0,0,0)
+            measurement = Measurement(0,0,0,0,0,0)
             measurement.timestamp = int(time.time())
             temp=int.from_bytes(data[0:2],byteorder='little',signed=True)/100
             #print("Temp received: " + str(temp))
@@ -152,9 +153,17 @@ class MyDelegate(btle.DefaultDelegate):
             humidity=int.from_bytes(data[2:3],byteorder='little')
             print("Temperature: " + str(temp))
             print("Humidity: " + str(humidity))
-
+            voltage=int.from_bytes(data[3:5],byteorder='little') / 1000.
+            print("Battery voltage:",voltage)
             measurement.temperature = temp
             measurement.humidity = humidity
+            measurement.voltage = voltage
+            if args.battery:
+                    #measurement.battery = globalBatteryLevel
+                    batteryLevel = min(int(round((voltage - 2.1),2) * 100), 100) #3.1 or above --> 100% 2.1 --> 0 %
+                    measurement.battery = batteryLevel
+                    print("Battery level:",batteryLevel)
+				
 
             if args.offset:
                 humidityCalibrated = humidity + args.offset
@@ -180,9 +189,6 @@ class MyDelegate(btle.DefaultDelegate):
                 print("Calibrated humidity: " + str(humidityCalibrated))
                 measurement.calibratedHumidity = humidityCalibrated
 
-            if args.battery:
-                measurement.battery = globalBatteryLevel
-
             # send mqtt
             message = '{"temperature": "' + str(measurement.temperature) + '", '
             message = message + '"humidity": "' + str(measurement.humidity) + '", '
@@ -201,14 +207,15 @@ class MyDelegate(btle.DefaultDelegate):
 def connect():
     p = btle.Peripheral(adress)    
     val=b'\x01\x00'
-    p.writeCharacteristic(0x0038,val,True)
+    p.writeCharacteristic(0x0038,val,True) #enable notifications of Temperature, Humidity and Battery voltage
+    p.writeCharacteristic(0x0046,b'\xf4\x01\x00',True)
     p.withDelegate(MyDelegate("abc"))
     return p
 
 # Main loop --------
 parser=argparse.ArgumentParser()
 parser.add_argument("--device","-d", help="Set the device MAC-Address in format AA:BB:CC:DD:EE:FF",metavar='AA:BB:CC:DD:EE:FF')
-parser.add_argument("--battery","-b", help="Read batterylevel every Nth update", metavar='N', type=int)
+parser.add_argument("--battery","-b", help="Get estimated battery level", metavar='', type=int, nargs='?', const=1)
 parser.add_argument("--count","-c", help="Read/Receive N measurements and then exit script", metavar='N', type=int)
 
 rounding = parser.add_argument_group("Rounding and debouncing")
@@ -297,12 +304,13 @@ while True:
             connected=True
             unconnectedTime=None
             
-        if args.battery:
-                if(cnt % args.battery == 0):
-                    batt=p.readCharacteristic(0x001b)
-                    batt=int.from_bytes(batt,byteorder="little")
-                    print("Battery-Level: " + str(batt))
-                    globalBatteryLevel = batt
+            # if args.battery:
+			    # if(cnt % args.battery == 0):
+                            # print("Warning the battery option is deprecated, Aqara device always reports 99 % battery")
+                            # batt=p.readCharacteristic(0x001b)
+                            # batt=int.from_bytes(batt,byteorder="little")
+                            # print("Battery-Level: " + str(batt))
+                            # globalBatteryLevel = batt
             
             
         if p.waitForNotifications(2000):
